@@ -1,11 +1,32 @@
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
 import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "10000"))
 
 DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Crypto AI Trading Bot is running.")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
 
 
 def money(value):
@@ -14,11 +35,12 @@ def money(value):
 
     try:
         value = float(value)
-    except:
+    except (TypeError, ValueError):
         return "N/A"
 
     if value >= 1_000_000:
         return f"${value / 1_000_000:.2f}M"
+
     if value >= 1_000:
         return f"${value / 1_000:.2f}K"
 
@@ -34,8 +56,7 @@ def get_pairs(query):
 
     response.raise_for_status()
 
-    data = response.json()
-    return data.get("pairs", [])
+    return response.json().get("pairs", [])
 
 
 def analyze_pair(pair):
@@ -44,6 +65,7 @@ def analyze_pair(pair):
     price_change = (pair.get("priceChange") or {}).get("h24") or 0
 
     txns = (pair.get("txns") or {}).get("h24") or {}
+
     buys = txns.get("buys", 0)
     sells = txns.get("sells", 0)
 
@@ -65,8 +87,11 @@ def analyze_pair(pair):
     if buys > sells:
         score += 20
 
-    if buys + sells > 0 and buys / (buys + sells) >= 0.55:
-        score += 10
+    total_transactions = buys + sells
+
+    if total_transactions > 0:
+        if buys / total_transactions >= 0.55:
+            score += 10
 
     if score >= 75:
         signal = "🟢 STRONG SETUP"
@@ -82,12 +107,13 @@ def analyze_pair(pair):
         "volume": volume,
         "change": price_change,
         "buys": buys,
-        "sells": sells
+        "sells": sells,
     }
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = """
+    await update.message.reply_text(
+        """
 🤖 Crypto AI Trading Agent
 
 Bot is online.
@@ -95,19 +121,18 @@ Bot is online.
 Commands:
 
 /scan COIN
-Analyze a coin on DEX markets.
+DEX market scanner.
 
 /analyze COIN
-Run a deeper market scan.
+Market analysis.
 
 /help
 Show commands.
 
-⚠️ Current mode: TEST / PAPER TRADING
+⚠️ Current mode: PAPER TRADING
 No real money is being traded.
 """
-
-    await update.message.reply_text(message)
+    )
 
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -132,7 +157,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Sort by liquidity
         pairs = sorted(
             pairs,
             key=lambda p: (p.get("liquidity") or {}).get("usd") or 0,
@@ -152,7 +176,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             chain = pair.get("chainId", "unknown")
             dex = pair.get("dexId", "unknown")
-
             price = pair.get("priceUsd")
 
             results.append(
@@ -179,8 +202,8 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "\n".join(results)
 
         text += (
-            "\n\n⚠️ This is market research only. "
-            "No real trade has been executed."
+            "\n\n⚠️ Market research only."
+            "\nNo real trade has been executed."
         )
 
         await update.message.reply_text(
@@ -188,9 +211,9 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
-    except Exception as e:
+    except Exception as error:
         await update.message.reply_text(
-            f"❌ Scan error:\n{str(e)}"
+            f"❌ Scan error:\n{error}"
         )
 
 
@@ -252,9 +275,15 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>{result['signal']}</b>
 
-⚠️ AI research, technical indicators,
-website/X research and real trading execution
-will be added in the next modules.
+🚧 Next modules:
+• AI analysis
+• Technical indicators
+• Website research
+• X/Twitter research
+• Contract risk checks
+• Entry / SL / TP
+• Automatic alerts
+• Paper trading engine
 
 Current mode: PAPER TRADING.
 """
@@ -264,9 +293,9 @@ Current mode: PAPER TRADING.
             parse_mode="HTML"
         )
 
-    except Exception as e:
+    except Exception as error:
         await update.message.reply_text(
-            f"❌ Analysis error:\n{str(e)}"
+            f"❌ Analysis error:\n{error}"
         )
 
 
@@ -292,7 +321,7 @@ Show commands.
 • Contract risk checks
 • Entry / SL / TP
 • Automatic alerts
-• Paper trading engine
+• Paper trading
 • Later: automatic trading
 """
     )
@@ -303,6 +332,13 @@ def main():
         raise RuntimeError(
             "BOT_TOKEN environment variable is missing."
         )
+
+    health_thread = threading.Thread(
+        target=start_health_server,
+        daemon=True
+    )
+
+    health_thread.start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
